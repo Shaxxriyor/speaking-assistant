@@ -19,14 +19,12 @@ export const examiner = {
   title: "IELTS Speaking Examiner",
   // Put your licensed media in public/examiner/. Missing files fall back gracefully:
   // room scene → idle + talking videos → live-animated photo (needs face.json) → photo with subtle motion → silhouette.
-  // Seated behind the desk in the exam room (built by scripts/compose_scene.py).
+  // Seated behind the desk in the exam room; only her face and head are animated.
   scene: {
-    background: "/examiner/room.jpg",
-    person: "/examiner/person.png",
+    image: "/examiner/room-scene.jpg",
     data: "/examiner/scene.json",
-    still: "/examiner/scene.jpg",
-    // Centre on her face; zoom in more on phones so her face stays readable.
-    framing: { focus: [0.57, 0.45] as [number, number], zoomWide: 1.15, zoomTall: 1.55 },
+    // Centre on her; zoom in more on phones so her face stays readable.
+    framing: { focus: [0.54, 0.5] as [number, number], zoomWide: 1.1, zoomTall: 1.5 },
   },
   photo: "/examiner/photo.jpg",
   faceData: "/examiner/face.json",

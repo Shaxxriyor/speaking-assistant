@@ -6,14 +6,10 @@ import { TalkingPhoto, type FaceData, type Framing } from "./TalkingPhoto";
 export type AvatarMode = "idle" | "speaking" | "listening" | "thinking";
 
 export interface ExaminerScene {
-  /** Room without her (with her shadow baked in). */
-  background: string;
-  /** Her cut-out, same size as the room. */
-  person: string;
-  /** Landmarks + desk line in room coordinates (scripts/compose_scene.py). */
+  /** Picture of her seated in the exam room. */
+  image: string;
+  /** Her facial landmarks in that picture (scripts/face_landmarks.py with a crop box). */
   data: string;
-  /** Still composite used when WebGL is unavailable. */
-  still: string;
   framing: Framing;
 }
 
@@ -117,9 +113,9 @@ export function ExaminerAvatar({ name, title, scene, photo, faceData, idleVideo,
 
         {media === "room" && scene && sceneFace && (
           <TalkingPhoto
-            src={scene.person}
-            background={scene.background}
+            src={scene.image}
             face={sceneFace}
+            localMotion
             framing={scene.framing}
             alt={`${name}, ${title}, seated in the exam room`}
             mode={mode}
@@ -129,7 +125,7 @@ export function ExaminerAvatar({ name, title, scene, photo, faceData, idleVideo,
         )}
 
         {media === "room-still" && scene && (
-          <img className="avatar__media avatar__still" src={scene.still} alt={`${name}, ${title}, seated in the exam room`} />
+          <img className="avatar__media avatar__still" src={scene.image} alt={`${name}, ${title}, seated in the exam room`} />
         )}
 
         {media === "live" && photo && face && (

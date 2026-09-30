@@ -3,16 +3,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { AvatarMode } from "./ExaminerAvatar";
 
-/**
- * Normalised [x, y] facial points in the image: scripts/face_landmarks.py (portrait) or
- * scripts/compose_scene.py (examiner seated in the room, which also gives the desk line).
- */
+/** Output of scripts/face_landmarks.py: normalised [x, y] facial points in the image. */
 export interface FaceData {
   width: number;
   height: number;
   points: Record<string, [number, number]>;
-  /** Room mode: image row of the desk's top edge; she is hidden below it. */
-  deskY?: number;
 }
 
 export interface Framing {
@@ -24,11 +19,13 @@ export interface Framing {
 }
 
 interface Props {
-  /** The examiner: a portrait photo, or a room-sized cut-out PNG when `background` is set. */
   src: string;
-  /** Room mode: the static room behind her. */
-  background?: string;
   face: FaceData;
+  /**
+   * Move only her head (fading out into the neck and shoulders) instead of the whole picture.
+   * Use for a scene where she sits in a room, so the room stays perfectly still.
+   */
+  localMotion?: boolean;
   alt: string;
   mode: AvatarMode;
   voiceLevel: number;
@@ -41,16 +38,15 @@ attribute vec2 a_pos;
 void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }
 `;
 
-// Warps the examiner's photo in real time (and, in room mode, composites her over the room behind the desk):
+// Warps the examiner's photo in real time:
 //  - jaw/lips open by u_open, revealing a shaded mouth interior with upper teeth
 //  - upper eyelids slide down by u_blink: lid skin with a lash line along its edge
-//  - the whole head rotates/translates slightly around the neck
+//  - the head rotates/translates slightly around the neck (the whole picture, or just her head with u_headR > 0)
 const FRAG = `
 precision highp float;
 uniform sampler2D u_tex;
-uniform sampler2D u_bg;
-uniform float u_hasBg;
-uniform float u_deskY;
+uniform vec2 u_headC;
+uniform float u_headR;
 uniform vec2 u_res;
 uniform vec2 u_img;
 uniform vec4 u_crop;
@@ -64,7 +60,7 @@ uniform float u_open;
 uniform vec2 u_mlip;
 uniform vec2 u_ec[2];
 uniform vec2 u_ex[2];
-uniform vec3 u_edim[2];
+uniform vec4 u_edim[2]; // half-width, lid height, lower height, distance to brow
 uniform float u_blink;
 
 vec2 down(vec2 axis) { vec2 n = vec2(-axis.y, axis.x); return n.y < 0.0 ? -n : n; }
@@ -72,12 +68,12 @@ vec2 down(vec2 axis) { vec2 n = vec2(-axis.y, axis.x); return n.y < 0.0 ? -n : n
 void main() {
   vec2 uv = vec2(gl_FragCoord.x / u_res.x, 1.0 - gl_FragCoord.y / u_res.y);
   vec2 p = u_crop.xy + uv * u_crop.zw;
-  vec2 room = p;
 
   // Head motion (inverse transform around the neck pivot).
   vec2 d = p - u_pivot - u_head.xy;
   float c = cos(-u_head.z), s = sin(-u_head.z);
-  p = u_pivot + mat2(c, s, -s, c) * d / u_scale;
+  vec2 moved = u_pivot + mat2(c, s, -s, c) * d / u_scale;
+  p = u_headR > 0.0 ? mix(p, moved, 1.0 - smoothstep(u_headR * 0.75, u_headR * 1.6, length(p - u_headC))) : moved;
 
   // Blinks: the upper lid (skin sampled from just under the brow) slides down, with a lash line on its edge.
   vec3 lidCol = vec3(0.0);
@@ -96,7 +92,7 @@ void main() {
       float w = 1.0 - smoothstep(0.75, 1.0, abs(xn));
       float t = clamp((r.y - top) / max(lid - top, 0.5), 0.0, 1.0);
       // Lid skin comes from between the lashes and the brow, blurred sideways so no lash strands show.
-      vec2 sp = u_ec[i] + ex * r.x + ey * (-bt * 2.6 + (r.y - top) * 0.12);
+      vec2 sp = u_ec[i] + ex * r.x + ey * (-u_edim[i].w * 0.6 + (r.y - top) * 0.12);
       vec3 skin = vec3(0.0);
       for (int k = -3; k <= 3; k++) skin += texture2D(u_tex, clamp((sp + ex * float(k) * 3.0) / u_img, 0.0, 1.0)).rgb;
       skin = skin / 7.0 * mix(1.0, 0.8, t * t);
@@ -138,8 +134,7 @@ void main() {
   }
   srcY += lipLine;
   vec2 ps = u_mc + u_mx * q.x + my * srcY;
-  vec4 person = texture2D(u_tex, clamp(ps / u_img, 0.0, 1.0));
-  vec3 col = person.rgb;
+  vec3 col = texture2D(u_tex, clamp(ps / u_img, 0.0, 1.0)).rgb;
 
   // Mouth interior between the lifted upper lip and the lowered lower lip.
   float inside = smoothstep(-lift0 - 1.0, -lift0 + 1.0, q.y) * (1.0 - smoothstep(lipGap - 1.0, lipGap + 1.0, q.y));
@@ -154,11 +149,6 @@ void main() {
   }
   col = mix(col, lidCol, lidMask);
 
-  if (u_hasBg > 0.5) {
-    // She sits behind the desk: the room shows around her and the desk hides her lower body.
-    float a = person.a * (1.0 - smoothstep(u_deskY - 0.75, u_deskY + 0.75, room.y));
-    col = mix(texture2D(u_bg, room / u_img).rgb, col, a);
-  }
   gl_FragColor = vec4(col, 1.0);
 }
 `;
@@ -192,6 +182,7 @@ function geometry(face: FaceData) {
   const chinD = Math.max(loT * 2, dot(sub(P("chin"), meet), my));
 
   const eye = (side: "L" | "R") => {
+    const brow = P(`brow${side}`);
     const outer = P(`eye${side}Outer`), inner = P(`eye${side}Inner`);
     const top = P(`eye${side}Top`), bottom = P(`eye${side}Bottom`);
     const c = mul(add(add(outer, inner), add(top, bottom)), 0.25);
@@ -200,12 +191,20 @@ function geometry(face: FaceData) {
     return {
       c,
       ex,
-      dim: [(len(sub(inner, outer)) / 2) * 1.18, Math.max(3, -dot(sub(top, c), ey)) * 1.35, Math.max(3, dot(sub(bottom, c), ey))],
+      dim: [
+        (len(sub(inner, outer)) / 2) * 1.18,
+        Math.max(3, -dot(sub(top, c), ey)) * 1.35,
+        Math.max(3, dot(sub(bottom, c), ey)),
+        Math.max(6, -dot(sub(brow, c), ey)),
+      ],
     };
   };
 
   const pivot = add(P("chin"), mul(my, chinD * 0.8));
-  return { mc, mx, lip, mdim: [halfW, upT, loT, chinD], eyes: [eye("L"), eye("R")], pivot };
+  const eyesMid = mul(add(eye("L").c, eye("R").c), 0.5);
+  const headC = mul(add(eyesMid, P("chin")), 0.5);
+  const headR = len(sub(P("jawRight"), P("jawLeft"))) * 1.05;
+  return { mc, mx, lip, mdim: [halfW, upT, loT, chinD], eyes: [eye("L"), eye("R")], pivot, headC, headR };
 }
 
 // Smooth pseudo-random motion from incommensurate sines.
@@ -214,7 +213,7 @@ const wobble = (t: number, seed: number) =>
 
 const PORTRAIT_FRAMING: Framing = { focus: [0.5, 0.45], zoomWide: 1, zoomTall: 1 };
 
-export function TalkingPhoto({ src, background, face, alt, mode, voiceLevel, framing = PORTRAIT_FRAMING, onUnsupported }: Props) {
+export function TalkingPhoto({ src, face, localMotion = false, alt, mode, voiceLevel, framing = PORTRAIT_FRAMING, onUnsupported }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const modeRef = useRef(mode);
   const levelRef = useRef(voiceLevel);
@@ -269,14 +268,12 @@ export function TalkingPhoto({ src, background, face, alt, mode, voiceLevel, fra
     gl.uniform4f(u("u_mdim"), g.mdim[0], g.mdim[1], g.mdim[2], g.mdim[3]);
     gl.uniform2fv(u("u_ec"), [...g.eyes[0].c, ...g.eyes[1].c]);
     gl.uniform2fv(u("u_ex"), [...g.eyes[0].ex, ...g.eyes[1].ex]);
-    gl.uniform3fv(u("u_edim"), [...g.eyes[0].dim, ...g.eyes[1].dim]);
+    gl.uniform4fv(u("u_edim"), [...g.eyes[0].dim, ...g.eyes[1].dim]);
     const uRes = u("u_res"), uCrop = u("u_crop"), uHead = u("u_head"), uScale = u("u_scale");
     const uOpen = u("u_open"), uBlink = u("u_blink");
-    gl.uniform1i(u("u_tex"), 0);
-    gl.uniform1i(u("u_bg"), 1);
-    gl.uniform1f(u("u_hasBg"), background ? 1 : 0);
-    gl.uniform1f(u("u_deskY"), face.deskY ?? face.height);
-    const baseScale = background ? 1 : 1.03; // a portrait is zoomed slightly so head motion never shows its edges
+    gl.uniform2f(u("u_headC"), g.headC[0], g.headC[1]);
+    gl.uniform1f(u("u_headR"), localMotion ? g.headR : 0);
+    const baseScale = localMotion ? 1 : 1.03; // a portrait is zoomed slightly so head motion never shows its edges
 
     const resize = () => {
       const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -300,14 +297,13 @@ export function TalkingPhoto({ src, background, face, alt, mode, voiceLevel, fra
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
-    const loadTexture = (url: string, unit: number) =>
+    const loadTexture = (url: string) =>
       new Promise<void>((resolve, reject) => {
         const img = new Image();
         img.onload = () => {
           if (disposed) return;
-          gl.activeTexture(gl.TEXTURE0 + unit);
           gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
-          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
           gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -320,7 +316,7 @@ export function TalkingPhoto({ src, background, face, alt, mode, voiceLevel, fra
 
     let raf = 0;
     let disposed = false;
-    Promise.all([loadTexture(src, 0), background ? loadTexture(background, 1) : Promise.resolve()]).then(() => {
+    loadTexture(src).then(() => {
       if (disposed) return;
       resize();
       setReady(true);
@@ -399,7 +395,7 @@ export function TalkingPhoto({ src, background, face, alt, mode, voiceLevel, fra
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [src, background, face, framing, onUnsupported]);
+  }, [src, face, localMotion, framing, onUnsupported]);
 
   return (
     <canvas

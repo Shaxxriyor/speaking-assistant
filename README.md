@@ -7,9 +7,10 @@ run by **Muslima**, a realistic examiner who speaks with a natural voice and lis
 
 - **Voice:** `app/api/speak/route.ts` uses OpenAI TTS (`gpt-4o-mini-tts`, voice `coral`) with a calm,
   neutral British examiner delivery. The next question is fetched while the student is answering, so there is no pause.
-- **Room:** she sits behind the desk in an IELTS exam room, seen from the candidate's chair. Her lips, blinks and head
-  move while the room stays still and the desk hides her lower body. Built by `scripts/compose_scene.py` from the room
-  image and her photo into `room.jpg`, `person.png`, `scene.json` and `scene.jpg`; rerun it if either image changes.
+- **Room:** she sits behind the desk in an IELTS exam room (`public/examiner/room-scene.jpg`), seen from the
+  candidate's chair. Only her head is animated (lips, blinks, head movement); the room stays still.
+  If you replace the picture, regenerate `scene.json` with a crop box around her face:
+  `python scripts/face_landmarks.py public/examiner/room-scene.jpg face_landmarker.task 700,260,980,560 > public/examiner/scene.json`
 - **Face:** without the room, `components/ExaminerAvatar.tsx` uses the best media found in `public/examiner/`:
   1. `idle.mp4` + `talking.mp4` — short video loops, cross-faded when she starts/stops talking (most realistic)
   2. `photo.jpg` + `face.json` — the photo animated live in the browser (WebGL): her lips and jaw open and close
