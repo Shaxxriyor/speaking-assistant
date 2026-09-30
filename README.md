@@ -1,63 +1,87 @@
-# IELTS Speaking Assistant
+# IELTS Speaking Examiner
 
-A full IELTS Speaking mock test (Introduction, Part 1, Part 2 cue card with 1-minute preparation, Part 3)
-run by **Muslima**, a realistic examiner who speaks with a natural voice and listens to the student.
+A realistic AI IELTS Speaking examiner: the candidate sits in an IELTS exam room and **Muslima**, the examiner,
+runs the full test (Introduction, Part 1, Part 2 with cue card and preparation, Part 3) from across the desk.
 
-## The examiner
+**Current stage:** application foundation + interactive examiner avatar. There is **no microphone and no speech
+recognition yet**. Candidate answers are typed into a developer text input. Speech recognition is the last stage.
 
-- **Voice:** `app/api/speak/route.ts` uses OpenAI TTS (`gpt-4o-mini-tts`, voice `coral`) with a calm,
-  neutral British examiner delivery. The next question is fetched while the student is answering, so there is no pause.
-- **Room:** she sits behind the desk in an IELTS exam room (`public/examiner/room-scene.jpg`), seen from the
-  candidate's chair. Only her head is animated (lips, blinks, head movement); the room stays still.
-  If you replace the picture, regenerate `scene.json` with a crop box around her face:
-  `python scripts/face_landmarks.py public/examiner/room-scene.jpg face_landmarker.task 700,260,980,560 > public/examiner/scene.json`
-- **Face:** without the room, `components/ExaminerAvatar.tsx` uses the best media found in `public/examiner/`:
-  1. `idle.mp4` + `talking.mp4` — short video loops, cross-faded when she starts/stops talking (most realistic)
-  2. `photo.jpg` + `face.json` — the photo animated live in the browser (WebGL): her lips and jaw open and close
-     with every syllable of her voice, she blinks naturally, breathes, moves her head while talking and gives
-     small acknowledging nods while the student speaks
-  3. `photo.jpg` alone — the portrait with gentle breathing and head movement
-  4. a silhouette if nothing exists
-
-  If you change the photo, regenerate `face.json` (eye, lip and chin positions):
-
-  ```bash
-  pip install mediapipe
-  curl -L -o face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
-  python scripts/face_landmarks.py public/examiner/photo.jpg face_landmarker.task > public/examiner/face.json
-  ```
-- **Questions:** edit `lib/examScript.ts`.
-
-## Speech-to-text (Whisper)
-
-Speech-to-text uses **OpenAI Whisper** on the server. It does not use the browser's `SpeechRecognition` API,
-so it works in Chrome, Edge, Safari (incl. iPhone) and Firefox.
-
-## How it works
-
-1. `lib/useWhisperRecorder.ts` records the microphone with `MediaRecorder`, shows a mic level, and stops
-   automatically after 4 s of silence (or at the time limit, e.g. 2 min for Part 2).
-2. The audio is uploaded to `app/api/transcribe/route.ts`.
-3. The route sends it to OpenAI (`whisper-1`, English) and returns `{ text }`. The API key stays on the server.
-
-## Setup
+## Run it
 
 ```bash
 npm install
-cp .env.example .env.local   # then paste your OPENAI_API_KEY
-npm run dev                  # open http://localhost:3000
+npm run dev            # http://localhost:3000
+npm test               # unit tests (exam engine, animation controllers, lip sync)
+npm run typecheck
 ```
 
-## Using it in the examiner app
+Optional: put `OPENAI_API_KEY=` in `.env.local` for her natural voice. Without it she uses the browser's voice.
 
-Replace the old browser speech-recognition code with the hook:
+### Developer panel
 
-```tsx
-const { status, transcript, error, level, start, stop } = useWhisperRecorder({
-  maxDurationMs: 120_000, // Part 2: 2 minutes
-  silenceMs: 4_000,       // auto-finish after 4 s of silence
-  onTranscript: (text) => sendToExaminer(text),
-});
+Press the **`** key (backquote) or open `/?dev=1`. It drives every avatar system independently: examiner states,
+blink, nods and other gestures, gaze targets (candidate / papers / laptop / left / right / up / down), expressions,
+writing, speaking a test line, manual sliders for every pose channel, and exam shortcuts (skip preparation, answers).
+It also shows the live pose and frame rate.
+
+## Architecture
+
+```
+src/
+  app/                    Next.js app (page, layout, /api/speak voice, /api/status)
+  components/
+    exam-room/            ExamRoom screen, useExamSession (composition root), captions, cue card, timers, input
+    examiner/             ExaminerView: mounts the avatar renderer on a canvas
+    dev/                  Hidden developer panel
+    ui/                   Buttons, panels, badges
+  avatar/
+    engine/               AvatarAnimationEngine: runs controllers each frame → AvatarPose → renderer
+    controllers/          Blink, Eye, Gaze, Head, FacialExpression, LipSync, HandGesture, Writing, Posture
+    state/                ExaminerState behaviour profiles (where she looks, expression, activity, gestures)
+    gestures/             GestureEngine + gesture definitions (nod, brow flash, pen tap, hand raise, …)
+    facial/               Expression presets
+    gaze/                 Gaze targets in the room
+    lipsync/              LipSyncEngine (text visemes + voice boundaries/loudness), voice adapter
+    renderer/             AvatarRenderer interface + PhotoRigRenderer (WebGL)
+  exam/
+    engine/               IELTSExamEngine state machine (IDLE → GREETING → PART_1 → PART_2 → PART_3 → ENDING)
+    parts/                Test rules/timings and per-session script selection
+    questions/            Question bank (Part 1 topics, Part 2 cue cards with linked Part 3 questions)
+  services/
+    speech/               SpeechInputProvider (MockSpeechInputProvider now), SpeechOutputProvider (browser/OpenAI voice)
+    ai/                   ExaminerAI interface + MockExaminerAI (scripted, follow-ups for short answers)
+  types/ utils/ config/
 ```
 
-Cost: `whisper-1` is about $0.006 per minute of audio (a full 12-minute mock ≈ $0.04).
+**How the pieces talk**
+
+- `IELTSExamEngine` asks `ExaminerAI` for the next turn, speaks it through a `SpeechOutputProvider`, and waits for the
+  answer from a `SpeechInputProvider`. It emits events (`phase`, `examinerState`, `examinerSays`, `cueCard`, …) and
+  knows nothing about React or the avatar.
+- `useExamSession` wires those events to the `AvatarAnimationEngine` (e.g. `examinerState → avatar.setState`) and
+  wraps the voice with `withLipSync` so everything she says moves her lips.
+- Each frame, the avatar engine runs its controllers in order on a neutral `AvatarPose` (posture → gaze → head →
+  eyes → blink → expression → lip sync → hands → writing), applies developer overrides, and calls
+  `AvatarRenderer.render(pose)`.
+
+**Swappable parts** (implement the interface, change one line in `useExamSession`):
+
+| Interface | Now | Later |
+| --- | --- | --- |
+| `SpeechInputProvider` | `MockSpeechInputProvider` (typed answers) | `OpenAITranscriptionProvider` (microphone + Whisper) |
+| `ExaminerAI` | `MockExaminerAI` (scripted) | LLM-backed examiner |
+| `SpeechOutputProvider` | Browser voice / OpenAI TTS | Any TTS |
+| `AvatarRenderer` | `PhotoRigRenderer` (animated reference photo) | 3D / photoreal renderer |
+
+## The examiner rig
+
+`PhotoRigRenderer` animates the reference picture (`public/examiner/room-scene.jpg`) in a single WebGL pass, using
+landmarks in `public/examiner/rig.json`: irises (gaze), eyelids (blinks, looking down), brows (raise/furrow), mouth
+(smile, lip shape, jaw opening with lip sync), head (turn, nod, tilt), torso (breathing, lean, weight shift) and the
+writing hand. Only her regions move; the room stays still.
+
+If the picture changes, rebuild the rig (see the top of `scripts/build_rig.py` for the model downloads):
+
+```bash
+python scripts/build_rig.py public/examiner/room-scene.jpg face_landmarker.task hand_landmarker.task > public/examiner/rig.json
+```
