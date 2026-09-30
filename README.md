@@ -1,4 +1,19 @@
-# IELTS Speaking Assistant — Whisper transcription
+# IELTS Speaking Assistant
+
+A full IELTS Speaking mock test (Introduction, Part 1, Part 2 cue card with 1-minute preparation, Part 3)
+run by **Muslima**, a realistic examiner who speaks with a natural voice and listens to the student.
+
+## The examiner
+
+- **Voice:** `app/api/speak/route.ts` uses OpenAI TTS (`gpt-4o-mini-tts`, voice `coral`) with a calm,
+  neutral British examiner delivery. The next question is fetched while the student is answering, so there is no pause.
+- **Face:** `components/ExaminerAvatar.tsx` uses the best media found in `public/examiner/`:
+  1. `idle.mp4` + `talking.mp4` — short video loops, cross-faded when she starts/stops talking (most realistic)
+  2. `photo.jpg` — the portrait with natural breathing, head movement and a nod while speaking
+  3. a silhouette if neither exists
+- **Questions:** edit `lib/examScript.ts`.
+
+## Speech-to-text (Whisper)
 
 Speech-to-text uses **OpenAI Whisper** on the server. It does not use the browser's `SpeechRecognition` API,
 so it works in Chrome, Edge, Safari (incl. iPhone) and Firefox.

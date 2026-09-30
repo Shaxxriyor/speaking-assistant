@@ -4,14 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export type RecorderStatus = "idle" | "listening" | "transcribing" | "done" | "error";
 
-export interface RecorderOptions {
+export interface RecordOptions {
   /** Hard cap on answer length, e.g. 120_000 for Part 2. */
   maxDurationMs?: number;
   /** Stop automatically after this much silence once the student has started speaking. 0 disables. */
   silenceMs?: number;
-  /** Mic level (0–1) above which we count the student as speaking. */
+  /** Mic level (0–1 RMS) above which we count the student as speaking. */
   speechThreshold?: number;
-  onTranscript?: (text: string) => void;
 }
 
 // Chrome/Edge/Firefox record webm/opus; Safari/iOS records mp4. Whisper accepts all of these.
@@ -31,25 +30,39 @@ function extensionFor(mime: string): string {
 /**
  * Records from the microphone with MediaRecorder and sends the audio to /api/transcribe (OpenAI Whisper).
  * Does not use the browser's SpeechRecognition API, so it works in every modern browser, including Safari and Firefox.
+ *
+ * `record()` resolves with the transcript once the student finishes (silence, time limit or `stop()`),
+ * or with null if recording or transcription failed (see `error`).
  */
-export function useWhisperRecorder({
-  maxDurationMs = 120_000,
-  silenceMs = 4_000,
-  speechThreshold = 0.04,
-  onTranscript,
-}: RecorderOptions = {}) {
+export function useWhisperRecorder(defaults: RecordOptions = {}) {
   const [status, setStatus] = useState<RecorderStatus>("idle");
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
   const maxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const onTranscriptRef = useRef(onTranscript);
-  onTranscriptRef.current = onTranscript;
+  const resolveRef = useRef<((text: string | null) => void) | null>(null);
+  const defaultsRef = useRef(defaults);
+  defaultsRef.current = defaults;
+
+  const finish = useCallback((text: string | null) => {
+    resolveRef.current?.(text);
+    resolveRef.current = null;
+  }, []);
+
+  const fail = useCallback(
+    (message: string) => {
+      setError(message);
+      setStatus("error");
+      finish(null);
+    },
+    [finish],
+  );
 
   const cleanup = useCallback(() => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
@@ -68,106 +81,131 @@ export function useWhisperRecorder({
     if (rec && rec.state !== "inactive") rec.stop();
   }, []);
 
-  const transcribe = useCallback(async (blob: Blob, mime: string) => {
-    setStatus("transcribing");
-    const body = new FormData();
-    body.append("audio", new File([blob], `answer.${extensionFor(mime)}`, { type: mime || blob.type }));
-    try {
-      const res = await fetch("/api/transcribe", { method: "POST", body });
-      const data = (await res.json().catch(() => ({}))) as { text?: string; error?: string };
-      if (!res.ok) throw new Error(data.error || `Transcription failed (${res.status}).`);
-      const text = data.text ?? "";
-      setTranscript(text);
-      setStatus("done");
-      onTranscriptRef.current?.(text);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Transcription failed. Please try again.");
-      setStatus("error");
-    }
-  }, []);
+  const transcribe = useCallback(
+    async (blob: Blob, mime: string) => {
+      setStatus("transcribing");
+      const body = new FormData();
+      body.append("audio", new File([blob], `answer.${extensionFor(mime)}`, { type: mime || blob.type }));
+      try {
+        const res = await fetch("/api/transcribe", { method: "POST", body });
+        const data = (await res.json().catch(() => ({}))) as { text?: string; error?: string };
+        if (!res.ok) throw new Error(data.error || `Transcription failed (${res.status}).`);
+        const text = data.text ?? "";
+        setTranscript(text);
+        setStatus("done");
+        finish(text);
+      } catch (e) {
+        fail(e instanceof Error ? e.message : "Transcription failed. Please try again.");
+      }
+    },
+    [fail, finish],
+  );
 
-  const start = useCallback(async () => {
-    setError(null);
-    setTranscript("");
+  const record = useCallback(
+    (options: RecordOptions = {}): Promise<string | null> => {
+      const {
+        maxDurationMs = 120_000,
+        silenceMs = 4_000,
+        speechThreshold = 0.04,
+      } = { ...defaultsRef.current, ...options };
 
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      setError("This browser can't record audio. Please update your browser.");
-      setStatus("error");
-      return;
-    }
-
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      // Only one recording at a time: settle any previous caller.
+      finish(null);
+      const result = new Promise<string | null>((resolve) => {
+        resolveRef.current = resolve;
       });
-    } catch {
-      setError("Microphone access was blocked. Allow the microphone in your browser settings and try again.");
-      setStatus("error");
-      return;
-    }
-    streamRef.current = stream;
+      setError(null);
+      setTranscript("");
+      setElapsedMs(0);
 
-    const mime = pickMimeType();
-    const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-    recorderRef.current = recorder;
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data);
-    };
-    recorder.onstop = () => {
-      cleanup();
-      const type = recorder.mimeType || mime;
-      const blob = new Blob(chunks, { type });
-      if (blob.size === 0) {
-        setError("No audio was recorded. Please try again.");
-        setStatus("error");
-        return;
-      }
-      void transcribe(blob, type);
-    };
+      void (async () => {
+        if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+          fail("This browser can't record audio. Please update your browser.");
+          return;
+        }
 
-    // Mic level meter + auto-stop on silence.
-    const ctx = new AudioContext();
-    audioCtxRef.current = ctx;
-    const analyser = ctx.createAnalyser();
-    analyser.fftSize = 1024;
-    ctx.createMediaStreamSource(stream).connect(analyser);
-    const samples = new Float32Array(analyser.fftSize);
-    let heardSpeech = false;
-    let lastLoud = performance.now();
+        let stream: MediaStream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          });
+        } catch {
+          fail("Microphone access was blocked. Allow the microphone in your browser settings and try again.");
+          return;
+        }
+        streamRef.current = stream;
 
-    const tick = () => {
-      analyser.getFloatTimeDomainData(samples);
-      let sum = 0;
-      for (const s of samples) sum += s * s;
-      const rms = Math.sqrt(sum / samples.length);
-      setLevel(Math.min(1, rms * 8));
-      const now = performance.now();
-      if (rms > speechThreshold) {
-        heardSpeech = true;
-        lastLoud = now;
-      } else if (silenceMs > 0 && heardSpeech && now - lastLoud > silenceMs) {
-        stop();
-        return;
-      }
-      rafRef.current = requestAnimationFrame(tick);
-    };
+        const mime = pickMimeType();
+        const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+        recorderRef.current = recorder;
+        const chunks: Blob[] = [];
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) chunks.push(e.data);
+        };
+        recorder.onstop = () => {
+          cleanup();
+          const type = recorder.mimeType || mime;
+          const blob = new Blob(chunks, { type });
+          if (blob.size === 0) {
+            fail("No audio was recorded. Please try again.");
+            return;
+          }
+          void transcribe(blob, type);
+        };
 
-    recorder.start(1000);
-    setStatus("listening");
-    rafRef.current = requestAnimationFrame(tick);
-    maxTimerRef.current = setTimeout(stop, maxDurationMs);
-  }, [cleanup, maxDurationMs, silenceMs, speechThreshold, stop, transcribe]);
+        // Mic level meter + auto-stop on silence.
+        const ctx = new AudioContext();
+        audioCtxRef.current = ctx;
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 1024;
+        ctx.createMediaStreamSource(stream).connect(analyser);
+        const samples = new Float32Array(analyser.fftSize);
+        const startedAt = performance.now();
+        let heardSpeech = false;
+        let lastLoud = startedAt;
 
-  useEffect(() => () => {
+        const tick = () => {
+          analyser.getFloatTimeDomainData(samples);
+          let sum = 0;
+          for (const s of samples) sum += s * s;
+          const rms = Math.sqrt(sum / samples.length);
+          setLevel(Math.min(1, rms * 8));
+          const now = performance.now();
+          setElapsedMs(now - startedAt);
+          if (rms > speechThreshold) {
+            heardSpeech = true;
+            lastLoud = now;
+          } else if (silenceMs > 0 && heardSpeech && now - lastLoud > silenceMs) {
+            stop();
+            return;
+          }
+          rafRef.current = requestAnimationFrame(tick);
+        };
+
+        recorder.start(1000);
+        setStatus("listening");
+        rafRef.current = requestAnimationFrame(tick);
+        maxTimerRef.current = setTimeout(stop, maxDurationMs);
+      })();
+
+      return result;
+    },
+    [cleanup, fail, finish, stop, transcribe],
+  );
+
+  /** Stop without transcribing (e.g. when the student leaves the test). */
+  const cancel = useCallback(() => {
     const rec = recorderRef.current;
     if (rec && rec.state !== "inactive") {
       rec.onstop = null;
       rec.stop();
     }
     cleanup();
-  }, [cleanup]);
+    finish(null);
+    setStatus("idle");
+  }, [cleanup, finish]);
 
-  return { status, transcript, error, level, start, stop };
+  useEffect(() => cancel, [cancel]);
+
+  return { status, transcript, error, level, elapsedMs, record, stop, cancel };
 }
