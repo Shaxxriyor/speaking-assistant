@@ -11,7 +11,8 @@ type Phase = "welcome" | "running" | "finished";
 interface Answer {
   part: number;
   question: string;
-  answer: string;
+  /** null = recorded in demo mode, not transcribed. */
+  answer: string | null;
 }
 
 const PART_LABEL = ["Introduction", "Part 1", "Part 2", "Part 3"];
@@ -22,7 +23,9 @@ function formatTime(ms: number) {
 }
 
 export default function ExamPage() {
-  const voice = useExaminerVoice();
+  // Demo mode (no OpenAI key on the server): browser voice, answers recorded but not transcribed.
+  const [demo, setDemo] = useState(false);
+  const voice = useExaminerVoice({ browserVoice: demo });
   const recorder = useWhisperRecorder();
 
   const [phase, setPhase] = useState<Phase>("welcome");
@@ -38,6 +41,13 @@ export default function ExamPage() {
   const cancelledRef = useRef(false);
   const prepDoneRef = useRef<(() => void) | null>(null);
   const retryRef = useRef<((choice: "retry" | "skip") => void) | null>(null);
+
+  useEffect(() => {
+    fetch("/api/status")
+      .then((r) => r.json())
+      .then((s: { openai?: boolean }) => setDemo(!s.openai))
+      .catch(() => {});
+  }, []);
 
   useEffect(
     () => () => {
@@ -95,17 +105,17 @@ export default function ExamPage() {
         setAnswerLimit(step.answer.maxMs);
         let text: string | null = null;
         while (text === null) {
-          text = await recorder.record(step.answer);
+          text = await recorder.record({ ...step.answer, transcribe: !demo });
           if (cancelledRef.current) return;
           if (text === null && (await askRetry()) === "skip") text = "";
         }
-        const answer = text;
+        const answer = demo && text === "" ? null : text;
         setAnswers((prev) => [...prev, { part: step.part, question: step.say, answer }]);
       }
     }
     setCard(null);
     setPhase("finished");
-  }, [askRetry, prepare, recorder, voice]);
+  }, [askRetry, demo, prepare, recorder, voice]);
 
   const start = () => {
     voice.unlock();
@@ -153,6 +163,12 @@ export default function ExamPage() {
         <section className="panel panel--center">
           <h1>Full IELTS Speaking test</h1>
           <p>About 12 minutes · Parts 1, 2 and 3. Use headphones in a quiet room and allow the microphone when asked.</p>
+          {demo && (
+            <p className="notice">
+              Demo mode: Muslima uses your browser&apos;s voice and your answers are recorded but not written out.
+              Add an OpenAI key to turn on her real voice and Whisper transcription.
+            </p>
+          )}
           <button className="btn btn--primary" onClick={start}>
             Start the test
           </button>
@@ -228,7 +244,9 @@ export default function ExamPage() {
               <li key={i}>
                 <span className="transcript__part">{PART_LABEL[a.part]}</span>
                 <p className="transcript__q">{a.question}</p>
-                <p className="transcript__a">{a.answer || <em>(skipped)</em>}</p>
+                <p className="transcript__a">
+                  {a.answer === null ? <em>(answer recorded, transcription is off in demo mode)</em> : a.answer || <em>(skipped)</em>}
+                </p>
               </li>
             ))}
           </ol>

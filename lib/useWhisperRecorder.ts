@@ -11,6 +11,8 @@ export interface RecordOptions {
   silenceMs?: number;
   /** Mic level (0–1 RMS) above which we count the student as speaking. */
   speechThreshold?: number;
+  /** false = record but don't send to Whisper (demo mode without an OpenAI key); resolves with "". */
+  transcribe?: boolean;
 }
 
 // Chrome/Edge/Firefox record webm/opus; Safari/iOS records mp4. Whisper accepts all of these.
@@ -107,6 +109,7 @@ export function useWhisperRecorder(defaults: RecordOptions = {}) {
         maxDurationMs = 120_000,
         silenceMs = 4_000,
         speechThreshold = 0.04,
+        transcribe: shouldTranscribe = true,
       } = { ...defaultsRef.current, ...options };
 
       // Only one recording at a time: settle any previous caller.
@@ -148,6 +151,11 @@ export function useWhisperRecorder(defaults: RecordOptions = {}) {
           const blob = new Blob(chunks, { type });
           if (blob.size === 0) {
             fail("No audio was recorded. Please try again.");
+            return;
+          }
+          if (!shouldTranscribe) {
+            setStatus("done");
+            finish("");
             return;
           }
           void transcribe(blob, type);

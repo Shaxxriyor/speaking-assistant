@@ -5,11 +5,34 @@ import { useCallback, useEffect, useRef, useState } from "react";
 // 44-byte silent WAV, played inside the Start click so iOS/Safari allow later playback on the same element.
 const SILENT_WAV = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
 
+// Preferred built-in voices for a British female examiner (Chrome, Edge/Windows, Safari/macOS).
+const PREFERRED_VOICES = ["Google UK English Female", "Sonia", "Libby", "Hazel", "Susan", "Serena", "Kate", "Martha"];
+
+function pickVoice(voices: SpeechSynthesisVoice[]) {
+  for (const name of PREFERRED_VOICES) {
+    const v = voices.find((x) => x.name.includes(name));
+    if (v) return v;
+  }
+  return voices.find((v) => v.lang === "en-GB") ?? voices.find((v) => v.lang.startsWith("en")) ?? null;
+}
+
+async function loadVoices(synth: SpeechSynthesis) {
+  if (synth.getVoices().length) return synth.getVoices();
+  await new Promise<void>((resolve) => {
+    const t = setTimeout(resolve, 1500);
+    synth.addEventListener("voiceschanged", () => (clearTimeout(t), resolve()), { once: true });
+  });
+  return synth.getVoices();
+}
+
 /**
  * Plays the examiner's lines through /api/speak (OpenAI TTS) and exposes a live voice level (0–1)
  * so the avatar can react while she talks. Call `unlock()` from a click handler before the first `say()`.
+ *
+ * With `browserVoice` (demo mode, no OpenAI key), or whenever /api/speak fails, she speaks with the
+ * browser's built-in voice instead, and her lips follow a simulated speech rhythm.
  */
-export function useExaminerVoice() {
+export function useExaminerVoice({ browserVoice = false }: { browserVoice?: boolean } = {}) {
   const [speaking, setSpeaking] = useState(false);
   const [level, setLevel] = useState(0);
 
@@ -19,6 +42,9 @@ export function useExaminerVoice() {
   const rafRef = useRef<number | null>(null);
   const cacheRef = useRef(new Map<string, Promise<string | null>>());
   const stopRef = useRef<(() => void) | null>(null);
+  const browserVoiceRef = useRef(browserVoice);
+  browserVoiceRef.current = browserVoice;
+  const utterancesRef = useRef<SpeechSynthesisUtterance[]>([]);
 
   const unlock = useCallback(() => {
     if (!audioRef.current) {
@@ -43,10 +69,20 @@ export function useExaminerVoice() {
       }
     }
     ctxRef.current?.resume().catch(() => {});
+
+    // iOS only lets speech synthesis start from a tap, so start (silently) now.
+    try {
+      const warmup = new SpeechSynthesisUtterance(" ");
+      warmup.volume = 0;
+      window.speechSynthesis.speak(warmup);
+    } catch {
+      // No speech synthesis: say() falls back to timed captions.
+    }
   }, []);
 
   /** Fetch (and cache) the audio for a line so it plays without delay later. */
   const prefetch = useCallback((text: string) => {
+    if (browserVoiceRef.current) return Promise.resolve(null);
     const cache = cacheRef.current;
     let entry = cache.get(text);
     if (!entry) {
@@ -83,9 +119,66 @@ export function useExaminerVoice() {
     rafRef.current = requestAnimationFrame(tick);
   }, []);
 
+  /** Speak with the browser's own voice; lips follow a syllable-like rhythm while each sentence plays. */
+  const speakWithBrowser = useCallback(async (text: string) => {
+    const synth = window.speechSynthesis;
+    const voice = pickVoice(await loadVoices(synth));
+    // One utterance per sentence: Chrome cuts off long utterances, and it gives natural pauses.
+    const sentences = text.match(/[^.!?]+[.!?]*/g)?.map((x) => x.trim()).filter(Boolean) ?? [text];
+
+    let active = false;
+    let bump = 0;
+    const started = performance.now();
+    const tick = () => {
+      const t = (performance.now() - started) / 1000;
+      bump *= 0.86;
+      const syllable = Math.max(0, Math.sin(t * 2 * Math.PI * 4.3) * 0.65 + Math.sin(t * 2 * Math.PI * 6.8 + 1.3) * 0.35);
+      setLevel(active ? 0.16 + 0.34 * syllable + 0.2 * bump : 0);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+
+    await new Promise<void>((resolve) => {
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(safety);
+        stopRef.current = null;
+        utterancesRef.current = [];
+        resolve();
+      };
+      // If the browser never reports the end, don't hang the test.
+      const safety = setTimeout(done, 4_000 + text.split(/\s+/).length * 700);
+      stopRef.current = () => {
+        synth.cancel();
+        done();
+      };
+      synth.cancel();
+      utterancesRef.current = sentences.map((sentence, i) => {
+        const u = new SpeechSynthesisUtterance(sentence);
+        if (voice) u.voice = voice;
+        u.lang = voice?.lang ?? "en-GB";
+        u.rate = 0.95;
+        u.onstart = () => (active = true);
+        u.onboundary = () => (bump = 1);
+        u.onend = () => {
+          active = false;
+          if (i === sentences.length - 1) done();
+        };
+        u.onerror = () => {
+          active = false;
+          if (i === sentences.length - 1) done();
+        };
+        return u;
+      });
+      for (const u of utterancesRef.current) synth.speak(u);
+    });
+  }, []);
+
   /**
-   * Speak a line and resolve when it has finished. If the voice is unavailable, waits roughly as long
-   * as reading the line would take, so the on-screen caption can carry the test instead.
+   * Speak a line and resolve when it has finished: OpenAI voice if available, otherwise the browser's voice,
+   * otherwise a pause as long as reading the line would take (the on-screen caption carries the test).
    */
   const say = useCallback(
     async (text: string): Promise<void> => {
@@ -94,7 +187,9 @@ export function useExaminerVoice() {
       setSpeaking(true);
       try {
         if (!url || !audio) {
-          await new Promise((r) => setTimeout(r, Math.min(12_000, 1_500 + text.split(/\s+/).length * 330)));
+          const wait = () => new Promise((r) => setTimeout(r, Math.min(12_000, 1_500 + text.split(/\s+/).length * 330)));
+          if ("speechSynthesis" in window) await speakWithBrowser(text).catch(wait);
+          else await wait();
           return;
         }
         await new Promise<void>((resolve) => {
@@ -120,7 +215,7 @@ export function useExaminerVoice() {
         setSpeaking(false);
       }
     },
-    [meter, prefetch],
+    [meter, prefetch, speakWithBrowser],
   );
 
   const silence = useCallback(() => stopRef.current?.(), []);
