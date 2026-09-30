@@ -27,6 +27,15 @@ button { font: inherit; }
 .avatar__media { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; object-position: 50% 30%; display: block; }
 .avatar__talking { transition: opacity .25s ease; }
 
+/* Seated in the exam room: a wide "across the desk" view, taller framing on phones. */
+.avatar--room { width: min(960px, 100%); border-radius: 20px; }
+.avatar--room .avatar__stage { aspect-ratio: 16 / 10; }
+.avatar--room .avatar__glow { background: linear-gradient(to top, rgb(8 12 22 / .7) 0%, transparent 22%); }
+.avatar__still { object-position: 57% 45%; }
+@media (max-width: 640px) {
+  .avatar--room .avatar__stage { aspect-ratio: 4 / 5; }
+}
+
 /* Still photo: slow breathing + tiny head drift so she never looks frozen. */
 .avatar__photo { transform-origin: 50% 70%; animation: breathe 5.5s ease-in-out infinite, drift 17s ease-in-out infinite; }
 /* While speaking, add a small nod that follows her voice. */

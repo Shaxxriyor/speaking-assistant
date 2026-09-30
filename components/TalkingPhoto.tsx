@@ -3,21 +3,36 @@
 import { useEffect, useRef, useState } from "react";
 import type { AvatarMode } from "./ExaminerAvatar";
 
-/** Output of scripts/face_landmarks.py: normalised [x, y] points in the photo. */
+/**
+ * Normalised [x, y] facial points in the image: scripts/face_landmarks.py (portrait) or
+ * scripts/compose_scene.py (examiner seated in the room, which also gives the desk line).
+ */
 export interface FaceData {
   width: number;
   height: number;
   points: Record<string, [number, number]>;
+  /** Room mode: image row of the desk's top edge; she is hidden below it. */
+  deskY?: number;
+}
+
+export interface Framing {
+  /** Point of the image to keep centred, normalised. */
+  focus: [number, number];
+  /** Zoom beyond "cover" for landscape and portrait boxes. */
+  zoomWide: number;
+  zoomTall: number;
 }
 
 interface Props {
+  /** The examiner: a portrait photo, or a room-sized cut-out PNG when `background` is set. */
   src: string;
+  /** Room mode: the static room behind her. */
+  background?: string;
   face: FaceData;
   alt: string;
   mode: AvatarMode;
   voiceLevel: number;
-  /** Matches CSS object-position for the vertical crop (0 = top, 1 = bottom). */
-  focusY?: number;
+  framing?: Framing;
   onUnsupported: () => void;
 }
 
@@ -26,13 +41,16 @@ attribute vec2 a_pos;
 void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }
 `;
 
-// Warps a single portrait photo in real time:
+// Warps the examiner's photo in real time (and, in room mode, composites her over the room behind the desk):
 //  - jaw/lips open by u_open, revealing a shaded mouth interior with upper teeth
 //  - upper eyelids slide down by u_blink: lid skin with a lash line along its edge
 //  - the whole head rotates/translates slightly around the neck
 const FRAG = `
 precision highp float;
 uniform sampler2D u_tex;
+uniform sampler2D u_bg;
+uniform float u_hasBg;
+uniform float u_deskY;
 uniform vec2 u_res;
 uniform vec2 u_img;
 uniform vec4 u_crop;
@@ -54,6 +72,7 @@ vec2 down(vec2 axis) { vec2 n = vec2(-axis.y, axis.x); return n.y < 0.0 ? -n : n
 void main() {
   vec2 uv = vec2(gl_FragCoord.x / u_res.x, 1.0 - gl_FragCoord.y / u_res.y);
   vec2 p = u_crop.xy + uv * u_crop.zw;
+  vec2 room = p;
 
   // Head motion (inverse transform around the neck pivot).
   vec2 d = p - u_pivot - u_head.xy;
@@ -119,7 +138,8 @@ void main() {
   }
   srcY += lipLine;
   vec2 ps = u_mc + u_mx * q.x + my * srcY;
-  vec3 col = texture2D(u_tex, clamp(ps / u_img, 0.0, 1.0)).rgb;
+  vec4 person = texture2D(u_tex, clamp(ps / u_img, 0.0, 1.0));
+  vec3 col = person.rgb;
 
   // Mouth interior between the lifted upper lip and the lowered lower lip.
   float inside = smoothstep(-lift0 - 1.0, -lift0 + 1.0, q.y) * (1.0 - smoothstep(lipGap - 1.0, lipGap + 1.0, q.y));
@@ -134,6 +154,11 @@ void main() {
   }
   col = mix(col, lidCol, lidMask);
 
+  if (u_hasBg > 0.5) {
+    // She sits behind the desk: the room shows around her and the desk hides her lower body.
+    float a = person.a * (1.0 - smoothstep(u_deskY - 0.75, u_deskY + 0.75, room.y));
+    col = mix(texture2D(u_bg, room / u_img).rgb, col, a);
+  }
   gl_FragColor = vec4(col, 1.0);
 }
 `;
@@ -187,7 +212,9 @@ function geometry(face: FaceData) {
 const wobble = (t: number, seed: number) =>
   (Math.sin(t * 0.83 + seed) + Math.sin(t * 1.37 + seed * 2.1) * 0.6 + Math.sin(t * 0.29 + seed * 3.7) * 0.8) / 2.4;
 
-export function TalkingPhoto({ src, face, alt, mode, voiceLevel, focusY = 0.3, onUnsupported }: Props) {
+const PORTRAIT_FRAMING: Framing = { focus: [0.5, 0.45], zoomWide: 1, zoomTall: 1 };
+
+export function TalkingPhoto({ src, background, face, alt, mode, voiceLevel, framing = PORTRAIT_FRAMING, onUnsupported }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const modeRef = useRef(mode);
   const levelRef = useRef(voiceLevel);
@@ -245,6 +272,11 @@ export function TalkingPhoto({ src, face, alt, mode, voiceLevel, focusY = 0.3, o
     gl.uniform3fv(u("u_edim"), [...g.eyes[0].dim, ...g.eyes[1].dim]);
     const uRes = u("u_res"), uCrop = u("u_crop"), uHead = u("u_head"), uScale = u("u_scale");
     const uOpen = u("u_open"), uBlink = u("u_blink");
+    gl.uniform1i(u("u_tex"), 0);
+    gl.uniform1i(u("u_bg"), 1);
+    gl.uniform1f(u("u_hasBg"), background ? 1 : 0);
+    gl.uniform1f(u("u_deskY"), face.deskY ?? face.height);
+    const baseScale = background ? 1 : 1.03; // a portrait is zoomed slightly so head motion never shows its edges
 
     const resize = () => {
       const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -254,37 +286,46 @@ export function TalkingPhoto({ src, face, alt, mode, voiceLevel, focusY = 0.3, o
       canvas.height = h;
       gl.viewport(0, 0, w, h);
       gl.uniform2f(uRes, w, h);
-      // object-fit: cover, horizontally centred, vertically at focusY.
+      // Like object-fit: cover, then zoomed and centred on the focus point (clamped to the image).
       const boxAspect = w / h, imgAspect = face.width / face.height;
-      if (imgAspect > boxAspect) {
-        const cw = face.height * boxAspect;
-        gl.uniform4f(uCrop, (face.width - cw) / 2, 0, cw, face.height);
-      } else {
-        const ch = face.width / boxAspect;
-        gl.uniform4f(uCrop, 0, (face.height - ch) * focusY, face.width, ch);
-      }
+      const zoom = boxAspect >= 1 ? framing.zoomWide : framing.zoomTall;
+      let cw = imgAspect > boxAspect ? face.height * boxAspect : face.width;
+      let ch = imgAspect > boxAspect ? face.height : face.width / boxAspect;
+      cw /= zoom;
+      ch /= zoom;
+      const x0 = Math.min(face.width - cw, Math.max(0, framing.focus[0] * face.width - cw / 2));
+      const y0 = Math.min(face.height - ch, Math.max(0, framing.focus[1] * face.height - ch / 2));
+      gl.uniform4f(uCrop, x0, y0, cw, ch);
     };
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
+    const loadTexture = (url: string, unit: number) =>
+      new Promise<void>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          if (disposed) return;
+          gl.activeTexture(gl.TEXTURE0 + unit);
+          gl.bindTexture(gl.TEXTURE_2D, gl.createTexture());
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+          gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+          resolve();
+        };
+        img.onerror = reject;
+        img.src = url;
+      });
+
     let raf = 0;
     let disposed = false;
-    const img = new Image();
-    img.onload = () => {
+    Promise.all([loadTexture(src, 0), background ? loadTexture(background, 1) : Promise.resolve()]).then(() => {
       if (disposed) return;
-      const tex = gl.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, tex);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
       resize();
       setReady(true);
       raf = requestAnimationFrame(frame);
-    };
-    img.onerror = onUnsupported;
-    img.src = src;
+    }, onUnsupported);
 
     // Animation state.
     let open = 0, speechEnv = 0;
@@ -346,7 +387,7 @@ export function TalkingPhoto({ src, face, alt, mode, voiceLevel, focusY = 0.3, o
 
       const o = override();
       gl.uniform3f(uHead, tx, ty, rot);
-      gl.uniform1f(uScale, 1.03 + breath * 0.004);
+      gl.uniform1f(uScale, baseScale + breath * 0.004);
       gl.uniform1f(uOpen, o?.open ?? open);
       gl.uniform1f(uBlink, o?.blink ?? blink);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -358,7 +399,7 @@ export function TalkingPhoto({ src, face, alt, mode, voiceLevel, focusY = 0.3, o
       cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [src, face, focusY, onUnsupported]);
+  }, [src, background, face, framing, onUnsupported]);
 
   return (
     <canvas

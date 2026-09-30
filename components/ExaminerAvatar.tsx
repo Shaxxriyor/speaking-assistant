@@ -1,13 +1,27 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { TalkingPhoto, type FaceData } from "./TalkingPhoto";
+import { TalkingPhoto, type FaceData, type Framing } from "./TalkingPhoto";
 
 export type AvatarMode = "idle" | "speaking" | "listening" | "thinking";
+
+export interface ExaminerScene {
+  /** Room without her (with her shadow baked in). */
+  background: string;
+  /** Her cut-out, same size as the room. */
+  person: string;
+  /** Landmarks + desk line in room coordinates (scripts/compose_scene.py). */
+  data: string;
+  /** Still composite used when WebGL is unavailable. */
+  still: string;
+  framing: Framing;
+}
 
 interface Props {
   name: string;
   title: string;
+  /** Seat her in an exam room. Takes priority over the videos and the portrait. */
+  scene?: ExaminerScene;
   photo?: string;
   /** Landmarks for the photo (scripts/face_landmarks.py); enables real lip movement and blinking. */
   faceData?: string;
@@ -18,7 +32,7 @@ interface Props {
   voiceLevel?: number;
 }
 
-type Media = "video" | "live" | "photo" | "silhouette";
+type Media = "room" | "room-still" | "video" | "live" | "photo" | "silhouette";
 
 /**
  * The examiner's face. Uses the best media available in public/examiner/:
@@ -28,15 +42,17 @@ type Media = "video" | "live" | "photo" | "silhouette";
  *  3. photo.jpg alone — still portrait with breathing and head movement (CSS)
  *  4. a silhouette if nothing exists
  */
-export function ExaminerAvatar({ name, title, photo, faceData, idleVideo, talkingVideo, mode, voiceLevel = 0 }: Props) {
+export function ExaminerAvatar({ name, title, scene, photo, faceData, idleVideo, talkingVideo, mode, voiceLevel = 0 }: Props) {
   const [media, setMedia] = useState<Media | null>(null);
   const [face, setFace] = useState<FaceData | null>(null);
+  const [sceneFace, setSceneFace] = useState<FaceData | null>(null);
   const idleRef = useRef<HTMLVideoElement>(null);
   const talkRef = useRef<HTMLVideoElement>(null);
   const speaking = mode === "speaking";
 
   const videoFailed = () => setMedia(photo ? (face ? "live" : "photo") : "silhouette");
   const liveFailed = useCallback(() => setMedia("photo"), []);
+  const roomFailed = useCallback(() => setMedia("room-still"), []);
 
   // Pick the best media that actually exists. Probing after mount (rather than relying on onError alone)
   // matters because a missing file can fail before React has attached its error handlers.
@@ -45,22 +61,26 @@ export function ExaminerAvatar({ name, title, photo, faceData, idleVideo, talkin
     const exists = (url?: string) =>
       url ? fetch(url, { method: "HEAD" }).then((r) => r.ok, () => false) : Promise.resolve(false);
     void (async () => {
-      const loadFace = (): Promise<FaceData | null> =>
-        faceData ? fetch(faceData).then((r) => (r.ok ? r.json() : null)).catch(() => null) : Promise.resolve(null);
-      const [idle, talk, still, landmarks] = await Promise.all([
+      const loadJson = (url?: string): Promise<FaceData | null> =>
+        url ? fetch(url).then((r) => (r.ok ? r.json() : null)).catch(() => null) : Promise.resolve(null);
+      const [roomData, idle, talk, still, landmarks] = await Promise.all([
+        loadJson(scene?.data),
         exists(idleVideo),
         exists(talkingVideo),
         exists(photo),
-        loadFace(),
+        loadJson(faceData),
       ]);
       if (!alive) return;
       setFace(landmarks);
-      setMedia(idle && talk ? "video" : still ? (landmarks ? "live" : "photo") : "silhouette");
+      setSceneFace(roomData);
+      setMedia(
+        roomData ? "room" : idle && talk ? "video" : still ? (landmarks ? "live" : "photo") : "silhouette",
+      );
     })();
     return () => {
       alive = false;
     };
-  }, [idleVideo, talkingVideo, photo, faceData]);
+  }, [scene?.data, idleVideo, talkingVideo, photo, faceData]);
 
   // Restart the talking loop from the top each time she starts speaking, so mouth motion lines up with speech onset.
   useEffect(() => {
@@ -76,7 +96,7 @@ export function ExaminerAvatar({ name, title, photo, faceData, idleVideo, talkin
   }, [media, speaking]);
 
   return (
-    <figure className={`avatar avatar--${mode}`} style={{ "--voice": voiceLevel.toFixed(3) } as React.CSSProperties}>
+    <figure className={`avatar avatar--${mode}${scene ? " avatar--room" : ""}`} style={{ "--voice": voiceLevel.toFixed(3) } as React.CSSProperties}>
       <div className="avatar__stage">
         {media === "video" && (
           <>
@@ -93,6 +113,23 @@ export function ExaminerAvatar({ name, title, photo, faceData, idleVideo, talkin
               onError={videoFailed}
             />
           </>
+        )}
+
+        {media === "room" && scene && sceneFace && (
+          <TalkingPhoto
+            src={scene.person}
+            background={scene.background}
+            face={sceneFace}
+            framing={scene.framing}
+            alt={`${name}, ${title}, seated in the exam room`}
+            mode={mode}
+            voiceLevel={voiceLevel}
+            onUnsupported={roomFailed}
+          />
+        )}
+
+        {media === "room-still" && scene && (
+          <img className="avatar__media avatar__still" src={scene.still} alt={`${name}, ${title}, seated in the exam room`} />
         )}
 
         {media === "live" && photo && face && (

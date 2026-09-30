@@ -140,6 +140,7 @@ export default function ExamPage() {
       <ExaminerAvatar
         name={examiner.name}
         title={examiner.title}
+        scene={examiner.scene}
         photo={examiner.photo}
         faceData={examiner.faceData}
         idleVideo={examiner.idleVideo}
