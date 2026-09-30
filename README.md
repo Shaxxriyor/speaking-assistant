@@ -9,8 +9,19 @@ run by **Muslima**, a realistic examiner who speaks with a natural voice and lis
   neutral British examiner delivery. The next question is fetched while the student is answering, so there is no pause.
 - **Face:** `components/ExaminerAvatar.tsx` uses the best media found in `public/examiner/`:
   1. `idle.mp4` + `talking.mp4` — short video loops, cross-faded when she starts/stops talking (most realistic)
-  2. `photo.jpg` — the portrait with natural breathing, head movement and a nod while speaking
-  3. a silhouette if neither exists
+  2. `photo.jpg` + `face.json` — the photo animated live in the browser (WebGL): her lips and jaw open and close
+     with every syllable of her voice, she blinks naturally, breathes, moves her head while talking and gives
+     small acknowledging nods while the student speaks
+  3. `photo.jpg` alone — the portrait with gentle breathing and head movement
+  4. a silhouette if nothing exists
+
+  If you change the photo, regenerate `face.json` (eye, lip and chin positions):
+
+  ```bash
+  pip install mediapipe
+  curl -L -o face_landmarker.task https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+  python scripts/face_landmarks.py public/examiner/photo.jpg face_landmarker.task > public/examiner/face.json
+  ```
 - **Questions:** edit `lib/examScript.ts`.
 
 ## Speech-to-text (Whisper)

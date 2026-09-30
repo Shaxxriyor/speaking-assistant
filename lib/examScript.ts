@@ -18,8 +18,9 @@ export const examiner = {
   name: "Muslima",
   title: "IELTS Speaking Examiner",
   // Put your licensed media in public/examiner/. Missing files fall back gracefully:
-  // idle + talking videos → photo with subtle motion → silhouette.
+  // idle + talking videos → live-animated photo (needs face.json) → photo with subtle motion → silhouette.
   photo: "/examiner/photo.jpg",
+  faceData: "/examiner/face.json",
   idleVideo: "/examiner/idle.mp4",
   talkingVideo: "/examiner/talking.mp4",
 };

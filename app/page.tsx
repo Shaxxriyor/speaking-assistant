@@ -141,6 +141,7 @@ export default function ExamPage() {
         name={examiner.name}
         title={examiner.title}
         photo={examiner.photo}
+        faceData={examiner.faceData}
         idleVideo={examiner.idleVideo}
         talkingVideo={examiner.talkingVideo}
         mode={phase === "running" ? mode : "idle"}

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { TalkingPhoto, type FaceData } from "./TalkingPhoto";
 
 export type AvatarMode = "idle" | "speaking" | "listening" | "thinking";
 
@@ -8,6 +9,8 @@ interface Props {
   name: string;
   title: string;
   photo?: string;
+  /** Landmarks for the photo (scripts/face_landmarks.py); enables real lip movement and blinking. */
+  faceData?: string;
   idleVideo?: string;
   talkingVideo?: string;
   mode: AvatarMode;
@@ -15,21 +18,25 @@ interface Props {
   voiceLevel?: number;
 }
 
-type Media = "video" | "photo" | "silhouette";
+type Media = "video" | "live" | "photo" | "silhouette";
 
 /**
  * The examiner's face. Uses the best media available in public/examiner/:
  *  1. idle.mp4 + talking.mp4 — real video loops, cross-faded as she starts/stops talking (most realistic)
- *  2. photo.jpg — still portrait with natural breathing, head movement and a voice-reactive glow
- *  3. a silhouette if neither exists
+ *  2. photo.jpg + face.json — the photo animated live in WebGL: lips and jaw move with her voice, real blinks,
+ *     natural head motion and acknowledging nods while the student speaks
+ *  3. photo.jpg alone — still portrait with breathing and head movement (CSS)
+ *  4. a silhouette if nothing exists
  */
-export function ExaminerAvatar({ name, title, photo, idleVideo, talkingVideo, mode, voiceLevel = 0 }: Props) {
+export function ExaminerAvatar({ name, title, photo, faceData, idleVideo, talkingVideo, mode, voiceLevel = 0 }: Props) {
   const [media, setMedia] = useState<Media | null>(null);
+  const [face, setFace] = useState<FaceData | null>(null);
   const idleRef = useRef<HTMLVideoElement>(null);
   const talkRef = useRef<HTMLVideoElement>(null);
   const speaking = mode === "speaking";
 
-  const videoFailed = () => setMedia(photo ? "photo" : "silhouette");
+  const videoFailed = () => setMedia(photo ? (face ? "live" : "photo") : "silhouette");
+  const liveFailed = useCallback(() => setMedia("photo"), []);
 
   // Pick the best media that actually exists. Probing after mount (rather than relying on onError alone)
   // matters because a missing file can fail before React has attached its error handlers.
@@ -38,13 +45,22 @@ export function ExaminerAvatar({ name, title, photo, idleVideo, talkingVideo, mo
     const exists = (url?: string) =>
       url ? fetch(url, { method: "HEAD" }).then((r) => r.ok, () => false) : Promise.resolve(false);
     void (async () => {
-      const [idle, talk, still] = await Promise.all([exists(idleVideo), exists(talkingVideo), exists(photo)]);
-      if (alive) setMedia(idle && talk ? "video" : still ? "photo" : "silhouette");
+      const loadFace = (): Promise<FaceData | null> =>
+        faceData ? fetch(faceData).then((r) => (r.ok ? r.json() : null)).catch(() => null) : Promise.resolve(null);
+      const [idle, talk, still, landmarks] = await Promise.all([
+        exists(idleVideo),
+        exists(talkingVideo),
+        exists(photo),
+        loadFace(),
+      ]);
+      if (!alive) return;
+      setFace(landmarks);
+      setMedia(idle && talk ? "video" : still ? (landmarks ? "live" : "photo") : "silhouette");
     })();
     return () => {
       alive = false;
     };
-  }, [idleVideo, talkingVideo, photo]);
+  }, [idleVideo, talkingVideo, photo, faceData]);
 
   // Restart the talking loop from the top each time she starts speaking, so mouth motion lines up with speech onset.
   useEffect(() => {
@@ -77,6 +93,10 @@ export function ExaminerAvatar({ name, title, photo, idleVideo, talkingVideo, mo
               onError={videoFailed}
             />
           </>
+        )}
+
+        {media === "live" && photo && face && (
+          <TalkingPhoto src={photo} face={face} alt={`${name}, ${title}`} mode={mode} voiceLevel={voiceLevel} onUnsupported={liveFailed} />
         )}
 
         {media === "photo" && (
