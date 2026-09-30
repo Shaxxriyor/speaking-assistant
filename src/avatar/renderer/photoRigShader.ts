@@ -184,7 +184,8 @@ void main() {
       for (int k = -3; k <= 3; k++) skin += tex(sp + ex * float(k) * 3.0);
       skin = skin / 7.0 * mix(1.0, 0.8, t * t);
       float cover = w * smoothstep(top - 1.0, top + 0.5, r.y) * (1.0 - smoothstep(lid - 0.8, lid + 0.8, r.y));
-      float lash = w * smoothstep(0.08, 0.3, closure) * exp(-pow((r.y - lid) / (1.2 + bt * 0.07), 2.0));
+      float ld = (r.y - lid) / (1.2 + bt * 0.07); // pow() of a negative base is undefined on some GPUs
+      float lash = w * smoothstep(0.08, 0.3, closure) * exp(-ld * ld);
       vec3 lidCol = mix(skin, vec3(0.09, 0.06, 0.06), lash / max(cover + lash, 0.001));
       col = mix(col, lidCol, max(cover, lash * 0.85));
     }

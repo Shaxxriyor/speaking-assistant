@@ -6,10 +6,13 @@ import { PhotoRigRenderer } from "@/avatar/renderer/PhotoRigRenderer";
 import { EXAMINER } from "@/config/examiner";
 import type { AvatarRig } from "@/types/rig";
 
+type Status = { kind: "loading" } | { kind: "ready" } | { kind: "fallback"; reason: string };
+
 /** Mounts the avatar renderer on a canvas and lets the animation engine drive it. */
 export function ExaminerView({ engine }: { engine: AvatarAnimationEngine }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [status, setStatus] = useState<"loading" | "ready" | "fallback">("loading");
+  const [status, setStatus] = useState<Status>({ kind: "loading" });
+  const [stillFailed, setStillFailed] = useState(false);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -20,10 +23,9 @@ export function ExaminerView({ engine }: { engine: AvatarAnimationEngine }) {
 
     (async () => {
       try {
-        const rig = (await fetch(EXAMINER.rig).then((r) => {
-          if (!r.ok) throw new Error(`Rig not found (${r.status})`);
-          return r.json();
-        })) as AvatarRig;
+        const res = await fetch(EXAMINER.rig);
+        if (!res.ok) throw new Error(`Could not load ${EXAMINER.rig} (HTTP ${res.status})`);
+        const rig = (await res.json()) as AvatarRig;
         renderer = new PhotoRigRenderer(EXAMINER.image, rig, EXAMINER.framing);
         await renderer.mount(canvas);
         if (disposed) return renderer.dispose();
@@ -33,10 +35,10 @@ export function ExaminerView({ engine }: { engine: AvatarAnimationEngine }) {
         resize();
         engine.setRenderer(renderer);
         engine.start();
-        setStatus("ready");
+        setStatus({ kind: "ready" });
       } catch (e) {
         console.error("Examiner renderer unavailable:", e);
-        if (!disposed) setStatus("fallback");
+        if (!disposed) setStatus({ kind: "fallback", reason: e instanceof Error ? e.message : String(e) });
       }
     })();
 
@@ -56,10 +58,23 @@ export function ExaminerView({ engine }: { engine: AvatarAnimationEngine }) {
         ref={canvasRef}
         role="img"
         aria-label={label}
-        className={`absolute inset-0 h-full w-full transition-opacity duration-500 ${status === "ready" ? "opacity-100" : "opacity-0"}`}
+        className={`absolute inset-0 h-full w-full transition-opacity duration-500 ${status.kind === "ready" ? "opacity-100" : "opacity-0"}`}
       />
-      {status === "fallback" && (
-        <img src={EXAMINER.image} alt={label} className="absolute inset-0 h-full w-full object-cover object-[54%_50%]" />
+      {status.kind === "fallback" && !stillFailed && (
+        <img
+          src={EXAMINER.image}
+          alt={label}
+          onError={() => setStillFailed(true)}
+          className="absolute inset-0 h-full w-full object-cover object-[54%_50%]"
+        />
+      )}
+      {status.kind === "fallback" && (
+        <div role="alert" className="absolute left-3 right-3 top-3 rounded-lg bg-slate-950/85 px-4 py-3 text-sm text-amber-200 backdrop-blur">
+          <p className="font-semibold">
+            {stillFailed ? "The examiner picture could not be loaded." : "The examiner is shown without animation."}
+          </p>
+          <p className="mt-1 font-mono text-xs text-slate-300">{stillFailed ? `${EXAMINER.image} failed to load. ` : ""}{status.reason}</p>
+        </div>
       )}
     </div>
   );
